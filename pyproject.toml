@@ -1,0 +1,25 @@
+[project]
+name = "hierarchical-config-merging"
+version = "0.1.0"
+description = "Hierarchical YAML config merging tool"
+readme = "Readme.md"
+requires-python = ">=3.12"
+dependencies = [
+    "maturin>=1.10.2",
+    "pyyaml>=6.0",
+]
+
+[tool.maturin]
+# Maturin configuration for building Rust extensions
+python-source = "src"
+module-name = "hierarchical_config_merging.hierarchical_config_merging"
+manifest-path = "rust/Cargo.toml"
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

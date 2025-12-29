@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+
+# Rust
+
+rust/target/
+Cargo.lock
+
+# Temporary files
+*.tmp
+*.swp
+
+# Logs
+*.log
+
+# Test outputs
+test_output/
+output/
+
+# Python test cache
+.pytest_cache/
