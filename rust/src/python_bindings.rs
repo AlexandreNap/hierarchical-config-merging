@@ -25,14 +25,24 @@ pub fn rust_merge_hierarchical_configs(
 fn config_to_python(value: &ConfigValue, py: Python) -> PyResult<PyObject> {
     match value {
         ConfigValue::String(s) => Ok(s.to_object(py)),
-        ConfigValue::Number(n) => Ok(n.to_object(py)),
-        ConfigValue::Boolean(b) => Ok(b.to_object(py)),
+        ConfigValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.to_object(py))
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.to_object(py))
+            } else {
+                Ok(0.to_object(py))
+            }
+        }
+        ConfigValue::Bool(b) => Ok(b.to_object(py)),
         ConfigValue::Null => Ok(py.None()),
-        ConfigValue::Map(m) => {
+        ConfigValue::Mapping(m) => {
             let dict = pyo3::types::PyDict::new(py);
             for (k, v) in m {
-                let py_value = config_to_python(v, py)?;
-                dict.set_item(k, py_value)?;
+                if let ConfigValue::String(key_str) = k {
+                    let py_value = config_to_python(v, py)?;
+                    dict.set_item(key_str, py_value)?;
+                }
             }
             Ok(dict.to_object(py))
         }
@@ -43,6 +53,10 @@ fn config_to_python(value: &ConfigValue, py: Python) -> PyResult<PyObject> {
                 list.append(py_item)?;
             }
             Ok(list.to_object(py))
+        }
+        ConfigValue::Tagged(t) => {
+            // Handle tagged values by converting the inner value
+            config_to_python(&t.value, py)
         }
     }
 }

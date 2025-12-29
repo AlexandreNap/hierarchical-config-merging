@@ -3,52 +3,11 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use anyhow::{Context, Result};
 use serde_yaml;
-use serde::{Deserialize, Serialize};
 
 pub mod python_bindings;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ConfigValue {
-    String(String),
-    Number(f64),
-    Boolean(bool),
-    Null,
-    Map(HashMap<String, ConfigValue>),
-    Sequence(Vec<ConfigValue>),
-}
-
-impl From<serde_yaml::Value> for ConfigValue {
-    fn from(value: serde_yaml::Value) -> Self {
-        match value {
-            serde_yaml::Value::String(s) => ConfigValue::String(s),
-            serde_yaml::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    ConfigValue::Number(i as f64)
-                } else if let Some(f) = n.as_f64() {
-                    ConfigValue::Number(f)
-                } else {
-                    ConfigValue::Number(0.0)
-                }
-            }
-            serde_yaml::Value::Bool(b) => ConfigValue::Boolean(b),
-            serde_yaml::Value::Null => ConfigValue::Null,
-            serde_yaml::Value::Mapping(m) => {
-                let mut map = HashMap::new();
-                for (k, v) in m {
-                    if let serde_yaml::Value::String(key) = k {
-                        map.insert(key, ConfigValue::from(v));
-                    }
-                }
-                ConfigValue::Map(map)
-            }
-            serde_yaml::Value::Sequence(s) => {
-                let seq = s.into_iter().map(ConfigValue::from).collect();
-                ConfigValue::Sequence(seq)
-            }
-            serde_yaml::Value::Tagged(_) => ConfigValue::Null,
-        }
-    }
-}
+/// Type alias for ConfigValue - we use serde_yaml::Value directly
+pub type ConfigValue = serde_yaml::Value;
 
 pub fn find_yaml_files_in_hierarchy(base_dir: &Path, target_path: &Path) -> Result<Vec<PathBuf>> {
     let base_dir = base_dir.canonicalize()?;
@@ -120,10 +79,9 @@ pub fn parse_yaml_configs(yaml_files: &[PathBuf]) -> Result<HashMap<String, Conf
         let content = fs::read_to_string(yaml_file)
             .with_context(|| format!("Failed to read file: {}", yaml_file.display()))?;
 
-        let value: serde_yaml::Value = serde_yaml::from_str(&content)
+        let config_value: ConfigValue = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse YAML: {}", yaml_file.display()))?;
 
-        let config_value = ConfigValue::from(value);
         configs.insert(yaml_file.to_string_lossy().to_string(), config_value);
     }
 
@@ -132,18 +90,18 @@ pub fn parse_yaml_configs(yaml_files: &[PathBuf]) -> Result<HashMap<String, Conf
 
 pub fn deep_merge(base: &ConfigValue, r#override: &ConfigValue) -> ConfigValue {
     match (base, r#override) {
-        (ConfigValue::Map(base_map), ConfigValue::Map(override_map)) => {
+        (ConfigValue::Mapping(base_map), ConfigValue::Mapping(override_map)) => {
             let mut result = base_map.clone();
             for (key, value) in override_map {
                 if let Some(base_value) = result.get(key) {
-                    // Recursively merge if both are maps
+                    // Recursively merge if both are mappings
                     result.insert(key.clone(), deep_merge(base_value, value));
                 } else {
                     // Insert new value
                     result.insert(key.clone(), value.clone());
                 }
             }
-            ConfigValue::Map(result)
+            ConfigValue::Mapping(result)
         }
         _ => r#override.clone(), // Override with new value
     }
@@ -153,7 +111,7 @@ pub fn merge_configs_by_depth(
     configs: &HashMap<String, ConfigValue>
 ) -> Result<(ConfigValue, Vec<String>)> {
     if configs.is_empty() {
-        return Ok((ConfigValue::Map(HashMap::new()), Vec::new()));
+        return Ok((ConfigValue::Mapping(serde_yaml::Mapping::new()), Vec::new()));
     }
 
     // Group configs by depth (directory level)
@@ -165,7 +123,7 @@ pub fn merge_configs_by_depth(
         depth_groups.entry(depth).or_default().push((file_path, config));
     }
 
-    let mut merged_config = ConfigValue::Map(HashMap::new());
+    let mut merged_config = ConfigValue::Mapping(serde_yaml::Mapping::new());
     let mut errors = Vec::new();
 
     // Process configs from shallowest to deepest
@@ -180,18 +138,20 @@ pub fn merge_configs_by_depth(
         let mut key_sources = HashMap::new();
 
         for (file_path, config) in depth_configs {
-            if let ConfigValue::Map(map) = config {
-                for key in map.keys() {
-                    if all_keys_at_depth.contains(key) {
-                        // Collision at same depth
-                        let existing_source = key_sources.get(key).unwrap();
-                        errors.push(format!(
-                            "Key collision at depth {}: '{}' found in both {} and {}",
-                            depth, key, existing_source, file_path
-                        ));
-                    } else {
-                        all_keys_at_depth.insert(key.clone());
-                        key_sources.insert(key.clone(), (*file_path).clone());
+            if let ConfigValue::Mapping(map) = config {
+                for (key, _) in map {
+                    if let ConfigValue::String(key_str) = key {
+                        if all_keys_at_depth.contains(key_str) {
+                            // Collision at same depth
+                            let existing_source = key_sources.get(key_str).unwrap();
+                            errors.push(format!(
+                                "Key collision at depth {}: '{}' found in both {} and {}",
+                                depth, key_str, existing_source, file_path
+                            ));
+                        } else {
+                            all_keys_at_depth.insert(key_str.clone());
+                            key_sources.insert(key_str.clone(), (*file_path).clone());
+                        }
                     }
                 }
             }
@@ -215,7 +175,7 @@ pub fn merge_hierarchical_configs(
 
     if yaml_files.is_empty() {
         return Ok((
-            ConfigValue::Map(HashMap::new()),
+            ConfigValue::Mapping(serde_yaml::Mapping::new()),
             vec![format!(
                 "No YAML files found in hierarchy from {} to {}",
                 base_dir.display(),
@@ -240,41 +200,37 @@ mod tests {
 
     #[test]
     fn test_deep_merge_basic() {
-        let base = ConfigValue::Map({
-            let mut m = HashMap::new();
-            m.insert("a".to_string(), ConfigValue::Number(1.0));
-            m.insert("b".to_string(), ConfigValue::Number(2.0));
-            let mut nested = HashMap::new();
-            nested.insert("nested".to_string(), ConfigValue::String("base".to_string()));
-            m.insert("c".to_string(), ConfigValue::Map(nested));
-            m
-        });
+        let mut base = serde_yaml::Mapping::new();
+        base.insert(serde_yaml::Value::String("a".to_string()), serde_yaml::Value::Number(serde_yaml::Number::from(1)));
+        base.insert(serde_yaml::Value::String("b".to_string()), serde_yaml::Value::Number(serde_yaml::Number::from(2)));
+        
+        let mut nested_base = serde_yaml::Mapping::new();
+        nested_base.insert(serde_yaml::Value::String("nested".to_string()), serde_yaml::Value::String("base".to_string()));
+        base.insert(serde_yaml::Value::String("c".to_string()), serde_yaml::Value::Mapping(nested_base));
 
-        let r#override = ConfigValue::Map({
-            let mut m = HashMap::new();
-            m.insert("b".to_string(), ConfigValue::Number(3.0));
-            m.insert("d".to_string(), ConfigValue::Number(4.0));
-            let mut nested = HashMap::new();
-            nested.insert("nested".to_string(), ConfigValue::String("override".to_string()));
-            nested.insert("new".to_string(), ConfigValue::String("value".to_string()));
-            m.insert("c".to_string(), ConfigValue::Map(nested));
-            m
-        });
+        let mut r#override = serde_yaml::Mapping::new();
+        r#override.insert(serde_yaml::Value::String("b".to_string()), serde_yaml::Value::Number(serde_yaml::Number::from(3)));
+        r#override.insert(serde_yaml::Value::String("d".to_string()), serde_yaml::Value::Number(serde_yaml::Number::from(4)));
+        
+        let mut nested_override = serde_yaml::Mapping::new();
+        nested_override.insert(serde_yaml::Value::String("nested".to_string()), serde_yaml::Value::String("override".to_string()));
+        nested_override.insert(serde_yaml::Value::String("new".to_string()), serde_yaml::Value::String("value".to_string()));
+        r#override.insert(serde_yaml::Value::String("c".to_string()), serde_yaml::Value::Mapping(nested_override));
 
-        let result = deep_merge(&base, &r#override);
+        let result = deep_merge(&ConfigValue::Mapping(base), &ConfigValue::Mapping(r#override));
 
-        if let ConfigValue::Map(result_map) = result {
-            assert_eq!(result_map.get("a"), Some(&ConfigValue::Number(1.0)));
-            assert_eq!(result_map.get("b"), Some(&ConfigValue::Number(3.0)));
-            assert_eq!(result_map.get("d"), Some(&ConfigValue::Number(4.0)));
+        if let ConfigValue::Mapping(result_map) = result {
+            assert_eq!(result_map.get(&ConfigValue::String("a".to_string())), Some(&ConfigValue::Number(serde_yaml::Number::from(1))));
+            assert_eq!(result_map.get(&ConfigValue::String("b".to_string())), Some(&ConfigValue::Number(serde_yaml::Number::from(3))));
+            assert_eq!(result_map.get(&ConfigValue::String("d".to_string())), Some(&ConfigValue::Number(serde_yaml::Number::from(4))));
 
-            if let Some(ConfigValue::Map(c_map)) = result_map.get("c") {
+            if let Some(ConfigValue::Mapping(c_map)) = result_map.get(&ConfigValue::String("c".to_string())) {
                 assert_eq!(
-                    c_map.get("nested"),
+                    c_map.get(&ConfigValue::String("nested".to_string())),
                     Some(&ConfigValue::String("override".to_string()))
                 );
                 assert_eq!(
-                    c_map.get("new"),
+                    c_map.get(&ConfigValue::String("new".to_string())),
                     Some(&ConfigValue::String("value".to_string()))
                 );
             } else {
@@ -289,41 +245,41 @@ mod tests {
     fn test_merge_configs_by_depth_basic() {
         let mut configs = HashMap::new();
 
-        let mut base_config = HashMap::new();
-        base_config.insert("key1".to_string(), ConfigValue::String("base_value".to_string()));
-        base_config.insert("key2".to_string(), ConfigValue::String("base_value2".to_string()));
+        let mut base_config = serde_yaml::Mapping::new();
+        base_config.insert(serde_yaml::Value::String("key1".to_string()), serde_yaml::Value::String("base_value".to_string()));
+        base_config.insert(serde_yaml::Value::String("key2".to_string()), serde_yaml::Value::String("base_value2".to_string()));
 
-        let mut level1_config = HashMap::new();
-        level1_config.insert("key2".to_string(), ConfigValue::String("level1_value".to_string()));
-        level1_config.insert("key3".to_string(), ConfigValue::String("level1_value3".to_string()));
+        let mut level1_config = serde_yaml::Mapping::new();
+        level1_config.insert(serde_yaml::Value::String("key2".to_string()), serde_yaml::Value::String("level1_value".to_string()));
+        level1_config.insert(serde_yaml::Value::String("key3".to_string()), serde_yaml::Value::String("level1_value3".to_string()));
 
-        let mut level2_config = HashMap::new();
-        level2_config.insert("key3".to_string(), ConfigValue::String("level2_value".to_string()));
-        level2_config.insert("key4".to_string(), ConfigValue::String("level2_value4".to_string()));
+        let mut level2_config = serde_yaml::Mapping::new();
+        level2_config.insert(serde_yaml::Value::String("key3".to_string()), serde_yaml::Value::String("level2_value".to_string()));
+        level2_config.insert(serde_yaml::Value::String("key4".to_string()), serde_yaml::Value::String("level2_value4".to_string()));
 
-        configs.insert("/base/config.yaml".to_string(), ConfigValue::Map(base_config));
-        configs.insert("/base/level1/config.yaml".to_string(), ConfigValue::Map(level1_config));
-        configs.insert("/base/level1/level2/config.yaml".to_string(), ConfigValue::Map(level2_config));
+        configs.insert("/base/config.yaml".to_string(), ConfigValue::Mapping(base_config));
+        configs.insert("/base/level1/config.yaml".to_string(), ConfigValue::Mapping(level1_config));
+        configs.insert("/base/level1/level2/config.yaml".to_string(), ConfigValue::Mapping(level2_config));
 
         let (merged_config, errors) = merge_configs_by_depth(&configs).unwrap();
 
         assert!(errors.is_empty());
 
-        if let ConfigValue::Map(merged_map) = merged_config {
+        if let ConfigValue::Mapping(merged_map) = merged_config {
             assert_eq!(
-                merged_map.get("key1"),
+                merged_map.get(&ConfigValue::String("key1".to_string())),
                 Some(&ConfigValue::String("base_value".to_string()))
             );
             assert_eq!(
-                merged_map.get("key2"),
+                merged_map.get(&ConfigValue::String("key2".to_string())),
                 Some(&ConfigValue::String("level1_value".to_string()))
             );
             assert_eq!(
-                merged_map.get("key3"),
+                merged_map.get(&ConfigValue::String("key3".to_string())),
                 Some(&ConfigValue::String("level2_value".to_string()))
             );
             assert_eq!(
-                merged_map.get("key4"),
+                merged_map.get(&ConfigValue::String("key4".to_string())),
                 Some(&ConfigValue::String("level2_value4".to_string()))
             );
         } else {
